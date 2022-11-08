@@ -1,15 +1,23 @@
-import logging
-import os
-from pyrogram import Client, filters
-import zlib
-import aio_pika
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from datetime import datetime
-import json
 import ast
 import asyncio
-from aio_pika.abc import AbstractRobustConnection, AbstractChannel
+import logging
+import os
+import zlib
+from datetime import datetime
+
+import aio_pika
+from aio_pika.abc import AbstractChannel, AbstractRobustConnection
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from pyrogram import Client, filters
+from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from pyrogram.types.bots_and_keyboards.callback_query import CallbackQuery
 from pyrogram.types.messages_and_media.message import Message
+
+
+logging.basicConfig(format='%(processName)s - [%(asctime)s: %(levelname)s] %(message)s')
+logger = logging.getLogger("fs")
+logger.setLevel(logging.INFO)
+logger.info("Start service")
 
 que_first_service = 'que_first_service'
 que_second_service = 'que_second_service'
@@ -18,11 +26,6 @@ TELEGRAM_API_TOKEN = os.getenv('TELEGRAM_API_TOKEN')
 API_ID = os.getenv('API_ID')
 API_HASH = os.getenv('API_HASH')
 RABBIT_SETTINGS = os.getenv('RABBIT_SETTINGS', 'amqp://guest:guest@localhost:5672/')
-
-logging.basicConfig(format='%(processName)s - [%(asctime)s: %(levelname)s] %(message)s')
-logger = logging.getLogger("fs")
-logger.setLevel(logging.INFO)
-logger.info("Start service")
 
 app = Client("tg_assist", bot_token=TELEGRAM_API_TOKEN, api_id=API_ID, api_hash=API_HASH)
 
@@ -61,14 +64,17 @@ async def receive_from_amqp(q: str) -> None:
                 mes = zlib.decompress(message.body)
                 response = ast.literal_eval(mes.decode('utf-8'))
                 logger.info(f'The message was received to RabbitMQ, queue={q}')
+
                 # send content to telegramm
-                if response['type_message'] == 'text':
-                    await app.send_message(chat_id=response['chat'],
-                                           text=response['val'],
-                                           reply_to_message_id=response['reply_id'])
-                elif response['type_message'] == 'media':
-                    await app.send_cached_media(chat_id=response['chat'], file_id=response['val'], reply_to_message_id=response['reply_id'])
-                logger.info('The message was sent to client telegram')
+                if response['flag'] == 1:
+                    await app.send_message(chat_id=response['chat'], text='Начните новый заказ с команды /start')
+                elif response['flag'] == 2:
+                    await app.send_message(chat_id=response['chat'], text=response['list_order'])
+                else:
+                    text, reply_markup = get_keyboard_answer(response['state'])
+                    await app.send_message(chat_id=response['chat'], text=text, reply_markup=reply_markup)
+
+                logger.info("The message was sent to client telegram")
 
                 if queue.name in mes.decode():
                     break
@@ -80,22 +86,41 @@ async def receive_from_amqp(q: str) -> None:
         exit()
 
 
-@app.on_message((filters.text | filters.media) & filters.private)
-async def echo(client: Client, message: Message) -> None:
-    """Send/Receive telegram-messages. The media filter takes into account content such as voice,
-       audio, video, photos, etc."""
-    # We pack in a dictionary user-chat_id, message_id for a specific response to the same message
-    if message.text:
-        logger.info(f"Get text-message from user id={message.chat.id}")
-        await send_to_amqp({'type_message': 'text', 'chat': message.chat.id, 'reply_id': message.id, 'val': message.text},
-                           que_first_service)
-    elif message.media:
-        logger.info(f"Get media-message from user id={message.chat.id}")
-        media_info = json.loads(str(getattr(message, message.media.value)))
-        await send_to_amqp({'type_message': 'media', 'chat': message.chat.id, 'reply_id': message.id, 'val': media_info['file_id']},
-                           que_first_service)
+def get_keyboard_answer(current_state: str) -> tuple[str, InlineKeyboardMarkup]:
+    """We return a response to the
+    user based on the state FSM.
+    Each state has its own set of keyboards and questions"""
 
-    logger.info(f'The message was sent to RabbitMQ, queue={que_first_service}')
+    if '>>' in current_state:
+        size, payment = current_state.split('>>')
+        dist_assoc = {current_state: ['Да', 'Отменить', f'Вы хотите {size.lower()} пиццу, оплата - {payment.lower()}?']}
+
+    elif current_state == 'full':
+        return 'Спасибо за заказ!\nДля просмотра заказов команда /hist', None
+
+    elif current_state == 'cancel':
+        return 'Заказ отменен!', None
+    else:
+        dist_assoc = {'empty': ['Большую', 'Маленькую', 'Создание заказа:\nКакую вы хотите пиццу?\nБольшую или маленькую?'],
+                      'Большую': ['Наличкой', 'Картой', 'Как вы будете платить?'],
+                      'Маленькую': ['Наличкой', 'Картой', 'Как вы будете платить?']}
+
+    inline_btn_1 = InlineKeyboardButton(dist_assoc[current_state][0], callback_data=dist_assoc[current_state][0])
+    inline_btn_2 = InlineKeyboardButton(dist_assoc[current_state][1], callback_data=dist_assoc[current_state][1])
+    inline_kb = InlineKeyboardMarkup([[inline_btn_1, inline_btn_2]])
+    answer = dist_assoc[current_state][2]
+    return answer, inline_kb
+
+
+@app.on_message((filters.command(commands=['start', 'hist'])) & filters.private)
+async def start(client: Client, message: Message) -> None:
+    await send_to_amqp({'type_message': 'command', 'chat': message.chat.id, 'val': message.text}, que_first_service)
+
+
+@app.on_callback_query()
+async def answer(client: Client, callback_query: CallbackQuery):
+    await send_to_amqp({'type_message': 'callback', 'chat': callback_query.message.chat.id, 'val': callback_query.data},
+                       que_first_service)
 
 
 async def start_consume() -> None:
