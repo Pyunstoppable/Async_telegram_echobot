@@ -1,7 +1,6 @@
-### Async telegram echobot
+### Async telegram bot
 
-this bot receives and sends telegram messages using RabbitMQ
-
+This bot receives and sends telegram messages using RabbitMQ to order pizza (test-case)
 
 ### Reqiurements
 
@@ -11,11 +10,11 @@ this bot receives and sends telegram messages using RabbitMQ
 
 [Pyrogram](https://github.com/pyrogram/pyrogram)
 
+### Description
 
-
-### Demo
-
-![preview](/preview.jpg "preview")
+The bot receives sends and receives messages and user callbacks to the RabbitMQ queue,
+then returns the necessary keyboards and answers to the messenger,
+focusing on the service for ordering pizza using the state of the machine in another service.
 
 ### Where do we start?
 
